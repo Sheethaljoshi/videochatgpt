@@ -1,0 +1,2 @@
+openai
+google-api-python-client
