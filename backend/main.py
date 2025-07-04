@@ -5,6 +5,7 @@ from openai import OpenAI
 from googleapiclient.discovery import build
 from dotenv import load_dotenv
 import os
+import re
 from typing import List, Dict
 
 # Load environment variables
@@ -62,13 +63,12 @@ def generate_best_search_query(user_input):
     
     return user_input  # fallback to original message
 
-
 # Request/Response models
 class ChatMessage(BaseModel):
     message: str
 
 class ChatResponse(BaseModel):
-    reply: str
+    reply_steps: List[str]  # Changed from single reply to list of steps
     video_id: str
     video_url: str
     video_title: str
@@ -143,6 +143,196 @@ def search_youtube(query, max_results=15):
         print(f"YouTube API error: {e}")
         return None, None, None, None
 
+# === FUNCTION: Break Down AI Response into Steps ===
+# === FUNCTION: Break Down AI Response into Steps ===
+def break_down_response_into_steps(response_text):
+    """
+    Uses AI to intelligently break down a response into logical steps
+    """
+    try:
+        breakdown_prompt = f"""
+        You are an expert at breaking down educational content into clear, digestible steps.
+        
+        Take the following math explanation and break it down into logical steps that are easy to follow.
+        Each step should be a complete thought that builds on the previous one.
+        
+        Rules:
+        1. Each step should be 1-3 sentences maximum
+        2. Start with the most basic concept or identification
+        3. Progress logically through the solution
+        4. End with the final answer or conclusion
+        5. Use clear, simple language
+        6. Format each step as: "Step X: [complete explanation]"
+        7. Do not use markdown formatting like **bold** or *italic*
+        8. Make sure each step contains the full explanation, not just a partial sentence
+        
+        Original explanation:
+        {response_text}
+        
+        Break this down into clear, complete steps:
+        """
+        
+        breakdown_response = client.chat.completions.create(
+            model="gpt-4",
+            messages=[{"role": "user", "content": breakdown_prompt}]
+        )
+        
+        breakdown_text = breakdown_response.choices[0].message.content.strip()
+        print(f"🔍 AI Breakdown Response: {breakdown_text}")  # Debug print
+        
+        # Parse the steps from the response
+        steps = []
+        lines = breakdown_text.split('\n')
+        
+        current_step = ""
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+                
+            # Check if this line starts a new step
+            if (line.startswith('Step ') or 
+                re.match(r'^\d+[\.\):]', line) or 
+                line.startswith('**Step ') or
+                re.match(r'^\*\*\d+\*\*', line)):
+                
+                # Save the previous step if it exists
+                if current_step.strip():
+                    steps.append(current_step.strip())
+                
+                # Start new step, remove step markers
+                step_text = re.sub(r'^(Step \d+:|\*\*Step \d+:\*\*|\d+[\.\):]|\*\*\d+\*\*)', '', line).strip()
+                current_step = step_text
+            else:
+                # Continue the current step
+                if current_step:
+                    current_step += " " + line
+                else:
+                    current_step = line
+        
+        # Don't forget the last step
+        if current_step.strip():
+            steps.append(current_step.strip())
+        
+        print(f"📝 Parsed {len(steps)} steps:")  # Debug print
+        for i, step in enumerate(steps, 1):
+            print(f"  Step {i}: {step[:100]}...")  # Debug print
+        
+        # If no steps were parsed or steps are too short, try a different approach
+        if not steps or len(steps) < 3 or any(len(step) < 20 for step in steps):
+            print("⚠️ Using fallback parsing method")
+            return fallback_step_parsing(response_text)
+        
+        return steps
+        
+    except Exception as e:
+        print(f"Error breaking down response: {e}")
+        return fallback_step_parsing(response_text)
+
+def fallback_step_parsing(response_text):
+    """
+    Fallback method for parsing steps when AI breakdown fails
+    """
+    # Split by sentences and group logically
+    sentences = re.split(r'[.!?]+', response_text)
+    sentences = [s.strip() for s in sentences if s.strip() and len(s.strip()) > 10]
+    
+    if len(sentences) <= 3:
+        return [s + "." for s in sentences]
+    
+    # Group sentences into logical steps (2-3 sentences per step)
+    steps = []
+    current_step = ""
+    sentence_count = 0
+    
+    for sentence in sentences:
+        if sentence_count < 2 and len(current_step) + len(sentence) < 200:
+            current_step += sentence + ". "
+            sentence_count += 1
+        else:
+            if current_step:
+                steps.append(current_step.strip())
+            current_step = sentence + ". "
+            sentence_count = 1
+    
+    # Add the last step
+    if current_step:
+        steps.append(current_step.strip())
+    
+    return steps if steps else [response_text]
+    """
+    Uses AI to intelligently break down a response into logical steps
+    """
+    try:
+        breakdown_prompt = f"""
+        You are an expert at breaking down educational content into clear, digestible steps.
+        
+        Take the following math explanation and break it down into logical steps that are easy to follow.
+        Each step should be a complete thought that builds on the previous one.
+        
+        Rules:
+        1. Each step should be 1-3 sentences maximum
+        2. Start with the most basic concept or identification
+        3. Progress logically through the solution
+        4. End with the final answer or conclusion
+        5. Use clear, simple language
+        6. Number each step (Step 1:, Step 2:, etc.)
+        
+        Original explanation:
+        {response_text}
+        
+        Break this down into clear steps:
+        """
+        
+        breakdown_response = client.chat.completions.create(
+            model="gpt-4",
+            messages=[{"role": "user", "content": breakdown_prompt}]
+        )
+        
+        breakdown_text = breakdown_response.choices[0].message.content.strip()
+        
+        # Parse the steps from the response
+        steps = []
+        lines = breakdown_text.split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            if line and (line.startswith('Step ') or line.startswith('**Step ') or 
+                        re.match(r'^\d+[\.\):]', line) or line.startswith('- ')):
+                # Clean up the step text
+                step_text = re.sub(r'^(Step \d+:|\*\*Step \d+:\*\*|\d+[\.\):]|\- )', '', line).strip()
+                if step_text:
+                    steps.append(step_text)
+        
+        # If no steps were parsed, try a simpler approach
+        if not steps:
+            # Split by sentences and group logically
+            sentences = re.split(r'[.!?]+', response_text)
+            sentences = [s.strip() for s in sentences if s.strip()]
+            
+            if len(sentences) <= 3:
+                return sentences
+            else:
+                # Group sentences into logical steps
+                steps = []
+                current_step = ""
+                for sentence in sentences:
+                    if len(current_step) + len(sentence) < 150:  # Keep steps concise
+                        current_step += sentence + ". "
+                    else:
+                        if current_step:
+                            steps.append(current_step.strip())
+                        current_step = sentence + ". "
+                if current_step:
+                    steps.append(current_step.strip())
+        
+        return steps if steps else [response_text]
+        
+    except Exception as e:
+        print(f"Error breaking down response: {e}")
+        # Fallback: simple sentence splitting
+        sentences = re.split(r'[.!?]+', response_text)
+        return [s.strip() + "." for s in sentences if s.strip()]
 
 # === FUNCTION: Generate AI Response ===
 def generate_ai_response(user_input):
@@ -150,7 +340,7 @@ def generate_ai_response(user_input):
         response = client.chat.completions.create(
             model="gpt-4",
             messages=[
-                {"role": "system", "content": "You are a friendly and knowledgeable math teacher. When a student sends a math expression or problem, you respond as if you're explaining it step by step in a clear and patient way. Use simple, encouraging language, and aim to teach the concept behind the question. If the question is unclear, try to interpret it based on what a student might mean. End with a helpful tip or encouragement if appropriate."},
+                {"role": "system", "content": "You are a friendly and knowledgeable math teacher. When a student sends a math expression or problem, you respond as if you're explaining it step by step in a clear and patient way. Use simple, encouraging language, and aim to teach the concept behind the question. Structure your response in a logical flow that can be easily broken down into steps. If the question is unclear, try to interpret it based on what a student might mean. Be thorough but concise in your explanations."},
                 {"role": "user", "content": user_input}
             ],
         )
@@ -171,6 +361,11 @@ async def chat_with_video(chat_message: ChatMessage):
         # Generate AI response
         ai_response = generate_ai_response(chat_message.message)
         
+        # Break down the response into steps
+        print("🔄 Breaking down response into steps...")
+        response_steps = break_down_response_into_steps(ai_response)
+        print(f"📝 Generated {len(response_steps)} steps")
+        
         # Generate optimized search query
         print("🧠 Generating smart search query...")
         search_query = generate_best_search_query(chat_message.message)
@@ -182,7 +377,7 @@ async def chat_with_video(chat_message: ChatMessage):
         if video_url:
             print(f"🎯 Top Video Found: {title} ({views:,} views)")
             return ChatResponse(
-                reply=ai_response,
+                reply_steps=response_steps,
                 video_id=video_id,
                 video_url=video_url,
                 video_title=title,
@@ -193,7 +388,7 @@ async def chat_with_video(chat_message: ChatMessage):
             print("⚠️ No relevant videos found, using fallback")
             fallback_video_id = "dQw4w9WgXcQ"  # Rick Roll as fallback
             return ChatResponse(
-                reply=f"{ai_response} (Note: I couldn't find a specific video for your query, so here's a classic!)",
+                reply_steps=response_steps,
                 video_id=fallback_video_id,
                 video_url=f"https://www.youtube.com/watch?v={fallback_video_id}",
                 video_title="Rick Astley - Never Gonna Give You Up",
